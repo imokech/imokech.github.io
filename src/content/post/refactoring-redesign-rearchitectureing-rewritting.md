@@ -1,9 +1,10 @@
 ---
-title: "Refactoring, Redesign, Re-architecting, or Rewrite? How to Choose Your Code Strategy"
+title: "Refactoring vs Redesign vs Re-architecting vs Rewriting"
 description: "A practical guide to understanding the four levels of code change—when to refactor, redesign, re-architect, or rewrite your codebase."
 publishDate: "1 August 2026"
 updatedDate: "1 August 2026"
 tags: ["software-engineering", "technical-debt", "refactoring", "architecture", "legacy-code"]
+pinned: true
 ---
 
 In software development, requirements change constantly—sometimes it's a quick feature tweak, other times it's an entirely new service. But changing code is never risk-free. The million-dollar question every team faces is: *How much change is actually necessary?*
