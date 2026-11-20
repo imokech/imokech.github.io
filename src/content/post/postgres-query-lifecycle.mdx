@@ -1,0 +1,119 @@
+---
+title: "A query is not a straight line"
+description: "Four interactive labs on PostgreSQL query lifecycles, planner costs, and index types."
+publishDate:  "20 November 2026"
+tags: ["software-engineering", "query", "indexing", "performance", "optimization", "postgresql"]
+pinned: true
+---
+
+import '../../styles/postgres-labs.css';
+import LifecycleLab from '../../components/postgres-labs/LifecycleLab.astro';
+import CostModelLab from '../../components/postgres-labs/CostModelLab.astro';
+import IndexMatrixLab from '../../components/postgres-labs/IndexMatrixLab.astro';
+import PlanRealityLab from '../../components/postgres-labs/PlanRealityLab.astro';
+import WorkMemLab from '../../components/postgres-labs/WorkMemLab.astro';
+import StatStatementsLab from '../../components/postgres-labs/StatStatementsLab.astro';
+import Sources from '../../components/postgres-labs/Sources.astro';
+
+<p class="pg-lede">PostgreSQL does more than read your SQL and return rows. It checks the query, applies rewrite rules, builds possible execution plans, estimates their cost, and runs one plan. The plan it chooses depends on the query, the data, the available indexes, and the planner settings.</p>
+
+This guide follows a query through PostgreSQL with six small interactive labs. The first shows the query lifecycle. The second explains how the planner compares costs. The third explores index types. The fourth shows how wrong row estimates can lead to slow plans. The fifth looks at memory limits and sorting, while the sixth shows how to find expensive queries using `pg_stat_statements`. The first shows the main steps a query goes through. The second shows how the planner compares estimated costs. The third compares index types and the operations they can support. The fourth shows how a wrong row estimate can lead to a slow execution plan.
+
+<p class="pg-aside"><strong>About the examples:</strong> All four labs run in the browser and do not connect to a PostgreSQL server. Some values and calculations are simplified to make the ideas easier to understand. They are educational examples, not real query benchmarks or exact copies of PostgreSQL’s internal calculations.</p>
+
+## Lab 01 — The path of a query
+
+A query passes through several stages. The parser builds an initial query tree, the rewrite system applies rules and expands views, and the planner creates possible execution paths and estimates their costs. The executor then follows the selected plan and returns rows. The planner is especially important for query performance because this is where PostgreSQL decides how to access the data and which operations to use.
+
+Click a stage. The artifact under each stage is what actually exists at that moment in the pipeline.
+
+<LifecycleLab />
+
+## Lab 02 — The planner is an economist
+
+The planner does not choose an Index Scan just because an index exists. It compares the estimated cost of different ways to read the data and chooses the plan it expects to be cheaper. Depending on the query and available indexes, it may consider a Sequential Scan, an Index Scan, a Bitmap Heap Scan, or an Index Only Scan.
+
+Move the sliders. The bars show the estimated costs of four scan strategies in this simplified model. Watch what happens when you lower `random_page_cost`, or change selectivity and make fewer or more rows match the query.
+
+<p class="pg-aside"><strong>About this model:</strong> It starts with PostgreSQL’s default cost constants (`seq_page_cost = 1.0`, `random_page_cost = 4.0`, `cpu_tuple_cost = 0.01`, `cpu_index_tuple_cost = 0.005`, and `cpu_operator_cost = 0.0025`). The demo also assumes 100 rows per table page and an index size equal to 10% of the table pages. These are fixed teaching assumptions, not PostgreSQL’s real estimates. When you enable the covering-index option, the demo also assumes an Index Only Scan can avoid heap visits; a real query still depends on the visibility map and other conditions.</p>
+
+<CostModelLab />
+
+## Lab 03 — An index is a promise about operators
+
+Different index types are designed for different kinds of searches. B-tree is the default and supports common equality and range conditions. Hash indexes support equality. GIN is an inverted index that is useful for values with multiple components, such as arrays and `jsonb`. GiST and SP-GiST are frameworks whose capabilities depend on the operator class. BRIN stores summaries for groups of table pages and is most useful when column values follow the physical order of the table.
+
+The matrix below is a general guide, not a complete compatibility reference. Actual support depends on the data type, operator, operator class, and sometimes the collation. The planner checks the operator family; it does not use a fixed yes/no list. Click a cell to see more detail and an example `CREATE INDEX` statement.
+
+<IndexMatrixLab />
+
+## Lab 04 — The plan is a hypothesis
+
+`EXPLAIN` shows the plan selected by PostgreSQL and the planner’s estimates. `EXPLAIN ANALYZE` also runs the query and shows what happened. Comparing estimated and actual rows can help find problems in a query plan. A plan can use valid operations and still be slow because the planner expected a very different number of rows.
+
+The example below uses the same query under two statistics scenarios. Assume that `status = 'open'` actually matches 1.24 million orders. In this example, accurate statistics help the planner understand that many rows match, so it may choose a Hash Join. With stale statistics, it expects only 20 rows and may choose a Nested Loop instead. The actual plan depends on available indexes, table sizes, data distribution, and cost estimates.
+Since the query also sorts by created_at, PostgreSQL may need to process all matching rows before returning the top 20, unless it can use an access path that already provides the required order.
+ With stale statistics, it expects only 20 rows and may choose a Nested Loop. The executor then performs an index lookup in the customers table for each of the 1.24 million orders.
+
+
+```sql
+SELECT o.id, o.customer_id, o.created_at, c.name
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+WHERE o.status = 'open'
+ORDER BY o.created_at DESC
+LIMIT 20;
+```
+
+## Lab 05 — When a sort spills to disk
+
+`work_mem` is a memory limit for individual query operations, not for the entire query.
+
+Operations such as Sort and Hash use this memory while processing data. A single query can have several of these operations running at the same time, and multiple queries can also run at once.
+
+Hash operations have an additional setting called `hash_mem_multiplier`, which controls how much memory they can use.
+
+When a Sort operation cannot fit its data in memory, PostgreSQL can switch to `external merge` and use temporary files. Hash operations can also use multiple batches and temporary files when they cannot fit in memory.
+
+Bitmap Heap Scans behave differently. When the bitmap needs more memory than available, PostgreSQL can switch to a lossy bitmap. This means it may need to check more rows on the affected table pages.
+
+Toggle `work_mem` and row counts. Watch how the sort method changes.
+
+A Sort that fits in memory may use `quicksort` or `top-N heapsort`. A Sort that needs disk space may use `external merge`.
+
+The execution time in this lab is illustrative. It grows in steps to show the extra work caused by additional merge passes, not to predict the exact performance of a real PostgreSQL server.
+
+<WorkMemLab />
+
+## Lab 06 — What `pg_stat_statements` actually tells you
+
+`pg_stat_statements` collects planning and execution statistics for SQL statements.
+
+It groups similar queries using a query identifier (`queryid`). Queries with different literal values can share the same normalized query structure. Entries are also separated by database, user, and whether the statement was executed at the top level.
+
+It provides useful information such as `calls`, `total_exec_time`, `mean_exec_time`, `rows`, and buffer usage.
+
+Two important columns are `total_exec_time` and `mean_exec_time`.
+
+A query called ten times with a high execution time, and another query called millions of times with a low execution time, can have the same total execution time.
+
+The difference is what these numbers tell us:
+
+- `total_exec_time` shows how much execution time a query has consumed across all its calls.
+- `mean_exec_time` shows the average execution time of each call.
+
+Sorting by `total_exec_time` helps identify queries that consume the most total execution time. Sorting by `mean_exec_time` helps identify queries with a high average execution time.
+
+Both matter, but they answer different questions.
+
+One important detail: the average does not show the full distribution. A query can have a reasonable average while some calls are much slower. Look at `max_exec_time` and `stddev_exec_time` as well when investigating inconsistent response times.
+
+The table below uses synthetic data. Click column headers to change the sort, and click a row to see the full query.
+
+<StatStatementsLab />
+
+## What to measure after reading this
+Indexes are not free. They take storage space and add work to database writes. Inserts and deletes require index maintenance, while updates may also require index changes when indexed values are affected. PostgreSQL exposes `pg_stat_user_indexes.idx_scan`, which counts how often each index has been scanned. An index with zero scans over a representative period is worth investigating, but that number alone is not a reason to remove it. Check the statistics period, the application workload, and whether the index supports a constraint or an infrequent query.
+The planner works with statistics about the data, not a complete picture of every row. Regular statistics mainly describe individual columns. When multiple columns are correlated, the planner may estimate the result size incorrectly; extended statistics can help with some of these cases. The default `random_page_cost = 4.0` is not automatically too high on every modern storage system. Tune cost settings only when measurements show that they do not represent your workload.
+When investigating a slow query, start with `EXPLAIN (ANALYZE, BUFFERS)`. Compare estimated rows with actual rows, paying attention to nodes with many loops. Then check statistics, query conditions, joins, and available indexes. Consider changing planner cost settings only when you have evidence that the current settings do not match the workload.
+<Sources /> 

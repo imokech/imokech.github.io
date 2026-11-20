@@ -1,0 +1,211 @@
+---
+// Lab 06 — pg_stat_statements, total time vs mean time
+---
+
+<div class="lab" id="lab-stat-statements">
+	<div class="lab-head">
+		<div>
+			<div class="lab-kicker">LAB 06 · PG_STAT_STATEMENTS</div>
+			<div class="lab-heading">Two questions, two different worst queries</div>
+		</div>
+	</div>
+
+	<p class="ss-hint">
+		The table below is sorted by <b id="ss-sort-label">total_exec_time</b>. Click a column header to
+		sort by it. Click a row for the full query and the insight.
+	</p>
+
+	<div class="ss-wrap">
+		<table class="ss-table" id="ss-table"></table>
+	</div>
+
+	<div class="ss-detail" id="ss-detail">
+		<h4>Click a row</h4>
+		<p class="ss-insight">
+			pg_stat_statements answers two different questions. “Which query consumed the most total
+			time?” and “Which query was slowest on average?” usually have different answers — and both
+			matter.
+		</p>
+	</div>
+</div>
+
+<script is:inline>
+	(function initStatStatements() {
+		const lab = document.getElementById("lab-stat-statements");
+		if (!lab) return;
+
+		const data = [
+			{
+				id: "upd_users",
+				sql: `UPDATE users
+SET last_seen = $1
+WHERE id = $2`,
+				calls: 800000,
+				total: 1600000,
+				mean: 2,
+				insight:
+					"Only 2 ms per call, but called 800,000 times. It has the highest total execution time in this sample. If repeated updates can safely be combined, batching or debouncing may reduce the number of database calls. Make sure this does not change the application's update requirements.",
+			},
+			{
+				id: "count_events",
+				sql: `SELECT count(*)
+FROM events
+WHERE created_at > $1`,
+				calls: 100,
+				total: 800000,
+				mean: 8000,
+				insight:
+					"8 seconds per call. This query has the highest mean execution time in the table. Check EXPLAIN ANALYZE, table size, selectivity, and buffer usage before deciding whether an index would help. A materialized view or cached counter could also help if the application can accept the required data freshness.",
+			},
+			{
+				id: "cart_join",
+				sql: `SELECT ci.*, p.name, p.price
+FROM cart_items ci
+JOIN products p ON p.id = ci.product_id
+WHERE ci.cart_id = $1`,
+				calls: 50000,
+				total: 500000,
+				mean: 10,
+				insight:
+					"A reasonable 10 ms per call, but 50,000 calls add up to 500 seconds of total execution time. <b>It looks fine on a single execution</b> and is easy to overlook in a slow-query log.",
+			},
+			{
+				id: "sel_products",
+				sql: `SELECT *
+FROM products
+WHERE category = $1
+ORDER BY created_at DESC
+LIMIT 50`,
+				calls: 2000,
+				total: 300000,
+				mean: 150,
+				insight:
+					"150 ms per call for a filtered list. A composite B-tree index on (category, created_at DESC) is a good candidate to test because it may help with both filtering and ordering. Check EXPLAIN ANALYZE before deciding. Since the query uses SELECT *, table access may still be required.",
+			},
+			{
+				id: "ins_logs",
+				sql: `INSERT INTO logs (level, message, ts)
+VALUES ($1, $2, now())`,
+				calls: 1000000,
+				total: 300000,
+				mean: 0.3,
+				insight:
+					"Only 0.3 ms per call, but one million calls add up to 300 seconds of execution time. Bulk inserts may reduce per-row overhead and database round trips. An asynchronous queue is another option, but it changes delivery and durability behavior.",
+			},
+			{
+				id: "sel_orders",
+				sql: `SELECT *
+FROM orders
+WHERE id = $1`,
+				calls: 500000,
+				total: 250000,
+				mean: 0.5,
+				insight:
+					"A simple primary-key lookup with a 0.5 ms average execution time. The total is 250 seconds across 500,000 calls. Before trying to optimize it, check whether this query is actually an important performance bottleneck.",
+			},
+			{
+				id: "del_sessions",
+				sql: `DELETE FROM sessions
+WHERE expires_at < now()`,
+				calls: 500,
+				total: 200000,
+				mean: 400,
+				insight:
+					"400 ms per call. Check the execution plan to understand how many rows are scanned and deleted. An index on expires_at may help when expired rows are selective, but large delete operations can still be expensive. Consider processing deletions in smaller batches.",
+			},
+		];
+
+		const columns = [
+			{ key: "id", label: "query", sortable: false },
+			{ key: "calls", label: "calls", sortable: true, num: true },
+			{ key: "total", label: "total_exec_time", sortable: true, num: true },
+			{ key: "mean", label: "mean_exec_time", sortable: true, num: true },
+		];
+
+		const tableEl = lab.querySelector("#ss-table");
+		const detailEl = lab.querySelector("#ss-detail");
+		const labelEl = lab.querySelector("#ss-sort-label");
+
+		let sortKey = "total";
+		let sortDir = "desc";
+		let selectedId = null;
+
+		const fmtNum = (n) => Math.round(n).toLocaleString("en-US");
+		const fmtMs = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms + " ms");
+
+		function fmtQueryShort(id) {
+			return data
+				.find((d) => d.id === id)
+				.sql.split("\n")[0]
+				.replace(
+					/\b(UPDATE|SELECT|INSERT|DELETE|FROM|WHERE|JOIN|ON|ORDER|LIMIT|VALUES)\b/g,
+					'<span class="kw">$1</span>',
+				)
+				.replace(
+					/\b(users|orders|events|products|cart_items|logs|sessions)\b/g,
+					'<span class="tbl">$1</span>',
+				);
+		}
+
+		function render() {
+			const sorted = [...data].sort((a, b) => {
+				const va = a[sortKey],
+					vb = b[sortKey];
+				return sortDir === "desc" ? vb - va : va - vb;
+			});
+
+			let thead = '<thead><tr><th style="width:28px">#</th>';
+			columns.forEach((c) => {
+				const sortedCls = c.key === sortKey ? "sorted" : "";
+				const sortableCls = c.sortable ? "sortable" : "";
+				const arrow = c.key === sortKey ? (sortDir === "desc" ? "▼" : "▲") : "";
+				thead += `<th class="${sortableCls} ${sortedCls}" ${c.sortable ? `data-sort="${c.key}"` : ""}>
+        ${c.label}<span class="arrow">${arrow}</span>
+      </th>`;
+			});
+			thead += "</tr></thead>";
+
+			let tbody = "<tbody>";
+			sorted.forEach((row, i) => {
+				const selCls = row.id === selectedId ? "selected" : "";
+				tbody += `<tr class="ss-row ${selCls}" data-id="${row.id}">
+        <td class="rank">${i + 1}</td>
+        <td class="ss-query">${fmtQueryShort(row.id)}</td>
+        <td class="num">${fmtNum(row.calls)}</td>
+        <td class="num">${fmtMs(row.total)}</td>
+        <td class="num">${fmtMs(row.mean)}</td>
+      </tr>`;
+			});
+			tbody += "</tbody>";
+
+			tableEl.innerHTML = thead + tbody;
+
+			tableEl.querySelectorAll("th[data-sort]").forEach((th) => {
+				th.addEventListener("click", () => {
+					const k = th.dataset.sort;
+					if (sortKey === k) sortDir = sortDir === "desc" ? "asc" : "desc";
+					else {
+						sortKey = k;
+						sortDir = "desc";
+					}
+					labelEl.textContent = th.textContent.replace(/[▲▼]/g, "").trim();
+					render();
+				});
+			});
+
+			tableEl.querySelectorAll(".ss-row").forEach((tr) => {
+				tr.addEventListener("click", () => {
+					selectedId = tr.dataset.id;
+					const row = data.find((d) => d.id === selectedId);
+					detailEl.innerHTML =
+						`<h4>${fmtQueryShort(row.id)}</h4>` +
+						`<pre class="full-sql">${row.sql}</pre>` +
+						`<p class="ss-insight">${row.insight}</p>`;
+					render();
+				});
+			});
+		}
+
+		render();
+	})();
+</script>

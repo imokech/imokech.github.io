@@ -1,0 +1,136 @@
+---
+// Lab 01 — The path of a query
+---
+
+<div class="lab" id="lab-lifecycle">
+	<div class="lab-head">
+		<div>
+			<div class="lab-kicker">LAB 01 · THE PATH OF A QUERY</div>
+			<div class="lab-heading">Five stages between your SQL and a row</div>
+		</div>
+		<div style="display:flex;gap:6px">
+			<button class="btn lc-prev">← Prev</button>
+			<button class="btn lc-next">Next →</button>
+		</div>
+	</div>
+	<div class="lc-query">
+		SELECT customer_id, status, created_at FROM orders WHERE customer_id = 42 AND status = 'open'
+		ORDER BY created_at DESC LIMIT 20;
+	</div>
+	<div class="lc-track" id="lc-track"></div>
+	<div class="lc-detail" id="lc-detail"></div>
+</div>
+
+<script is:inline>
+	(function initLifecycle() {
+		const lab = document.getElementById("lab-lifecycle");
+		if (!lab) return;
+
+		const stages = [
+			{
+				label: "Parse",
+				body: "The parser checks syntax and builds a parse tree. It does not know which indexes exist, how many rows match, or what anything costs.",
+				artifact: `SelectStmt
+├─ targetList: customer_id, status, created_at
+├─ fromClause: orders
+├─ whereClause
+│   ├─ customer_id = 42
+│   └─ status = 'open'
+└─ sortClause: created_at DESC`,
+			},
+			{
+				label: "Rewrite",
+				body: "The rewrite system applies rules and expands regular views. A query against a view is rewritten to work with the underlying tables before planning.",
+				artifact: `-- Before rewrite
+SELECT customer_id, status, created_at
+FROM open_orders
+WHERE customer_id = 42;
+
+-- After rewrite (simplified)
+SELECT customer_id, status, created_at
+FROM orders
+WHERE customer_id = 42
+  AND status = 'open';`,
+			},
+			{
+				label: "Plan",
+				body: "The planner enumerates paths. If an index exists, it considers an index scan as well as a sequential scan. It estimates the cost of each path and keeps the cheapest.",
+				artifact: `Path A — Seq Scan
+  estimated cost: 41,200
+
+Path B — Index Scan
+  using idx_orders_customer_status_created_at
+  estimated cost: 4,850   ← chosen
+
+Illustrative costs only; not measured output.`,
+			},
+			{
+				label: "Execute",
+				body: "The executor recursively steps through the plan tree. It pulls rows from the storage system, evaluates quals, performs sorts and joins, and hands back tuples.",
+				artifact: `Limit
+└─ Index Scan using
+   idx_orders_customer_status_created_at
+   ├─ index cond: customer_id = 42
+   │              AND status = 'open'
+   └─ rows returned: up to 20`,
+			},
+			{
+				label: "Result",
+				body: "The query returns up to 20 rows. The example shows the result only; it does not claim a measured execution time. Actual time depends on the data, indexes, cache, and server workload.",
+				artifact: `(20 rows)
+ customer_id | status | created_at
+─────────────┼────────┼────────────
+          42 | open   | 2026-11-17 …
+          42 | open   | 2026-11-16 …
+          42 | open   | 2026-11-15 …
+ ...`,
+			},
+		];
+
+		const track = lab.querySelector("#lc-track");
+		const detail = lab.querySelector("#lc-detail");
+		const packet = document.createElement("div");
+		packet.className = "lc-packet";
+		track.appendChild(packet);
+
+		let current = 0;
+		const nodes = [];
+
+		stages.forEach((s, i) => {
+			const b = document.createElement("button");
+			b.className = "lc-node";
+			b.innerHTML = `<span class="lc-node-num">0${i + 1}</span><span class="lc-node-label">${s.label}</span>`;
+			b.addEventListener("click", () => go(i));
+			track.appendChild(b);
+			nodes.push(b);
+		});
+
+		function go(i) {
+			current = i;
+			nodes.forEach((n, j) => n.classList.toggle("active", j === i));
+			const node = nodes[i];
+			packet.style.left = node.offsetLeft + node.offsetWidth / 2 - 4 + "px";
+
+			detail.classList.remove("show");
+			setTimeout(() => {
+				detail.innerHTML =
+					`<h4>${stages[i].label}</h4>` +
+					`<p>${stages[i].body}</p>` +
+					`<pre class="lc-artifact">${stages[i].artifact}</pre>`;
+				detail.classList.add("show");
+			}, 120);
+		}
+
+		lab
+			.querySelector(".lc-next")
+			.addEventListener("click", () => go(Math.min(stages.length - 1, current + 1)));
+		lab.querySelector(".lc-prev").addEventListener("click", () => go(Math.max(0, current - 1)));
+
+		window.addEventListener("resize", () => {
+			const node = nodes[current];
+			if (node) packet.style.left = node.offsetLeft + node.offsetWidth / 2 - 4 + "px";
+		});
+
+		go(0);
+	})();
+</script>

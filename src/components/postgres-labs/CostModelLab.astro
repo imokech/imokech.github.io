@@ -1,0 +1,163 @@
+---
+// Lab 02 — The planner as an economist
+---
+
+<div class="lab" id="lab-cost">
+	<div class="lab-head">
+		<div>
+			<div class="lab-kicker">LAB 02 · THE COST MODEL</div>
+			<div class="lab-heading">Four paths, one cheapest</div>
+		</div>
+		<div class="co-presets">
+			<button class="btn co-preset" data-rpc="4">Higher random I/O cost</button>
+			<button class="btn co-preset" data-rpc="1.1">Lower random I/O cost</button>
+		</div>
+	</div>
+
+	<div class="co-controls">
+		<label class="co-control">
+			<span>Table pages <b id="co-pages-val">20,000</b></span>
+			<input type="range" id="co-pages" min="1000" max="100000" step="1000" value="20000" />
+		</label>
+		<label class="co-control">
+			<span>Predicate selectivity <b id="co-sel-val">5.0%</b></span>
+			<input type="range" id="co-sel" min="0.1" max="100" step="0.1" value="5" />
+		</label>
+		<label class="co-control">
+			<span>random_page_cost <b id="co-rpc-val">4.0</b></span>
+			<input type="range" id="co-rpc" min="1" max="8" step="0.1" value="4" />
+		</label>
+		<label class="co-check">
+			<input type="checkbox" id="co-covering" />
+			covering index (Index Only Scan eligible)
+		</label>
+	</div>
+
+	<div class="co-bars" id="co-bars"></div>
+	<div class="co-verdict" id="co-verdict"></div>
+</div>
+
+<script is:inline>
+	(function initCost() {
+		const lab = document.getElementById("lab-cost");
+		if (!lab) return;
+
+		const SEQ_PAGE = 1.0;
+		const CPU_TUPLE = 0.01;
+		const CPU_INDEX_TUPLE = 0.005;
+		const CPU_OPERATOR = 0.0025;
+		const TUPLES_PER_PAGE = 100;
+		const INDEX_FRACTION = 0.1;
+
+		const pagesEl = lab.querySelector("#co-pages");
+		const selEl = lab.querySelector("#co-sel");
+		const rpcEl = lab.querySelector("#co-rpc");
+		const coveringEl = lab.querySelector("#co-covering");
+		const barsEl = lab.querySelector("#co-bars");
+		const verdictEl = lab.querySelector("#co-verdict");
+
+		const rows = [
+			{ key: "seq", name: "Seq Scan", formula: "seq_page_cost × pages + cpu_tuple_cost × tuples" },
+			{
+				key: "index",
+				name: "Index Scan",
+				formula: "random_page_cost × (index pages + heap pages) + CPU per tuple",
+			},
+			{
+				key: "bitmap",
+				name: "Bitmap Heap Scan",
+				formula: "random_page_cost × index pages + seq_page_cost × heap pages + CPU per tuple",
+			},
+			{
+				key: "ios",
+				name: "Index Only Scan",
+				formula: "random_page_cost × index pages + cpu_index_tuple_cost × tuples fetched",
+			},
+		];
+
+		rows.forEach((r) => {
+			const el = document.createElement("div");
+			el.className = "co-row";
+			el.dataset.key = r.key;
+			el.innerHTML = `
+      <span class="co-pick">◀ PLANNER PICKS</span>
+      <div class="co-row-head">
+        <span class="co-name">${r.name}</span>
+        <span class="co-cost" data-cost>0</span>
+      </div>
+      <div class="co-track"><div class="co-fill ${r.key}" data-fill></div></div>
+      <div class="co-formula">${r.formula}</div>`;
+			barsEl.appendChild(el);
+		});
+
+		const rowEls = {};
+		rows.forEach((r) => (rowEls[r.key] = barsEl.querySelector(`[data-key="${r.key}"]`)));
+
+		const fmt = (n) => Math.round(n).toLocaleString("en-US");
+
+		function update() {
+			const pages = +pagesEl.value;
+			const sel = +selEl.value / 100;
+			const rpc = +rpcEl.value;
+			const covering = coveringEl.checked;
+
+			lab.querySelector("#co-pages-val").textContent = pages.toLocaleString("en-US");
+			lab.querySelector("#co-sel-val").textContent = (sel * 100).toFixed(1) + "%";
+			lab.querySelector("#co-rpc-val").textContent = rpc.toFixed(1);
+
+			const tuples = pages * TUPLES_PER_PAGE;
+			const matched = Math.max(1, Math.round(tuples * sel));
+			const heapPages = Math.min(pages, Math.ceil(matched / TUPLES_PER_PAGE));
+			const indexPages = Math.max(1, Math.ceil(pages * INDEX_FRACTION));
+
+			const seqCost = SEQ_PAGE * pages + CPU_TUPLE * tuples;
+			const indexCost =
+				rpc * (indexPages + heapPages) + CPU_INDEX_TUPLE * matched + CPU_TUPLE * matched;
+			const bitmapCost =
+				rpc * indexPages + SEQ_PAGE * heapPages + CPU_TUPLE * matched + CPU_OPERATOR * matched;
+			const iosCost = rpc * indexPages + CPU_INDEX_TUPLE * matched;
+
+			const costs = { seq: seqCost, index: indexCost, bitmap: bitmapCost, ios: iosCost };
+
+			const eligible = ["seq", "index", "bitmap"];
+			if (covering) eligible.push("ios");
+
+			let winner = eligible[0];
+			eligible.forEach((k) => {
+				if (costs[k] < costs[winner]) winner = k;
+			});
+
+			const max = Math.max(seqCost, indexCost, bitmapCost, iosCost);
+
+			rows.forEach((r) => {
+				const el = rowEls[r.key];
+				const cost = costs[r.key];
+				el.querySelector("[data-cost]").textContent = fmt(cost);
+				el.querySelector("[data-fill]").style.width = (cost / max) * 100 + "%";
+				el.classList.toggle("chosen", r.key === winner);
+				el.classList.toggle("disabled", r.key === "ios" && !covering);
+			});
+
+			const winnerName = rows.find((r) => r.key === winner).name;
+			verdictEl.innerHTML =
+				`Planner picks: <b>${winnerName}</b> at ${fmt(costs[winner])} cost units.` +
+				`<span class="unit">Cost units are not milliseconds. They are the planner’s internal currency: page reads weighted by <code>random_page_cost</code>, plus CPU per tuple.` +
+				(covering
+					? " The model now treats Index Only Scan as eligible."
+					: " Index Only Scan is not considered until you assume a covering index.") +
+				`</span>`;
+		}
+
+		[pagesEl, selEl, rpcEl].forEach((el) => el.addEventListener("input", update));
+		coveringEl.addEventListener("change", update);
+
+		lab.querySelectorAll(".co-preset").forEach((btn) => {
+			btn.addEventListener("click", () => {
+				rpcEl.value = btn.dataset.rpc;
+				update();
+			});
+		});
+
+		update();
+	})();
+</script>

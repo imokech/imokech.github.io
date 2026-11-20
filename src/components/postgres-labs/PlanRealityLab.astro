@@ -1,0 +1,225 @@
+---
+// Lab 04 — Estimate vs reality
+---
+
+<div class="lab" id="lab-plan">
+	<div class="lab-head">
+		<div>
+			<div class="lab-kicker">LAB 04 · ESTIMATE VS REALITY</div>
+			<div class="lab-heading">Same query, two plans, one bad estimate</div>
+		</div>
+		<div class="pl-toggle">
+			<button class="btn pl-btn active" data-plan="good">Accurate stats</button>
+			<button class="btn pl-btn" data-plan="stale">Stale stats</button>
+		</div>
+	</div>
+	<div class="pl-summary" id="pl-summary"></div>
+	<div class="pl-tree" id="pl-tree"></div>
+	<div class="pl-legend">
+		<span><i style="background:#DDD"></i>illustrative total time (node + children)</span>
+		<span><i style="background:var(--pg-blue)"></i>illustrative node contribution</span>
+		<span><i style="background:var(--pg-red)"></i>contribution on a misestimated node</span>
+		<span>click a node for detail</span>
+	</div>
+	<p class="pg-aside">
+		The row counts illustrate the difference between estimates and reality. The times and per-node
+		time contributions are made-up teaching values, not a real <code>EXPLAIN ANALYZE</code> output. PostgreSQL
+		reports timing for plan nodes, but it does not provide a simple exclusive “self time” field in this
+		format.
+	</p>
+</div>
+
+<script is:inline>
+	(function initPlan() {
+		const lab = document.getElementById("lab-plan");
+		if (!lab) return;
+
+		const plans = {
+			good: {
+				summary:
+					"Illustrative total: <b>3,260 ms</b> · 20 rows returned · Hash Join · row estimates are close to reality.",
+				root: {
+					type: "Limit",
+					note: "Stops after 20 rows are returned. The Sort below still needs to read all rows from the join to identify the top 20.",
+					self: 0.02,
+					est: 20,
+					act: 20,
+					children: [
+						{
+							type: "Sort",
+							note: "Sort key: o.created_at DESC. The node returns the top 20 rows, but it processes the rows produced by the join before it can identify them.",
+							self: 120,
+							est: 1240000,
+							act: 20,
+							children: [
+								{
+									type: "Hash Join",
+									note: "The planner expects a large number of matching orders, so it uses a Hash Join instead of repeating a customer lookup for every order.",
+									self: 300,
+									est: 1240000,
+									act: 1240000,
+									children: [
+										{
+											type: "Seq Scan on orders o",
+											note: "Filter: status = 'open'. The estimate is close to the actual 1.24 million matching orders.",
+											self: 2500,
+											est: 1240000,
+											act: 1240000,
+										},
+										{
+											type: "Hash",
+											note: "Builds a hash table from the customer rows so the join can match orders without a separate index lookup for every order.",
+											self: 40,
+											est: 200000,
+											act: 200000,
+											children: [
+												{
+													type: "Seq Scan on customers c",
+													note: "Reads the customer rows used to build the hash table.",
+													self: 300,
+													est: 200000,
+													act: 200000,
+												},
+											],
+										},
+									],
+								},
+							],
+						},
+					],
+				},
+			},
+			stale: {
+				summary:
+					'Illustrative total: <b>8,355 ms</b> · 20 rows returned · <span class="bad">1.24M inner index lookups</span> · the order estimate is off by ×62,000.',
+				root: {
+					type: "Limit",
+					note: "Stops after 20 rows are returned. But the Sort must consume the rows produced by the Nested Loop before it can identify the top 20.",
+					self: 0.05,
+					est: 20,
+					act: 20,
+					children: [
+						{
+							type: "Sort",
+							note: "Sort key: o.created_at DESC. The node returns 20 rows, but it has to process the full input from the Nested Loop to find the top 20.",
+							self: 620,
+							est: 20,
+							act: 20,
+							children: [
+								{
+									type: "Nested Loop",
+									note: "The planner expected about 20 orders. It actually found 1.24 million. Each order triggers another lookup in the customers table.",
+									self: 250,
+									est: 20,
+									act: 1240000,
+									children: [
+										{
+											type: "Seq Scan on orders o",
+											note: "Filter: status = 'open'. The planner estimated 20 matching rows, but the actual count is 1,240,000. This is the main row-estimation error.",
+											self: 6900,
+											est: 20,
+											act: 1240000,
+											bad: true,
+										},
+										{
+											type: "Index Scan using customers_pkey on customers c",
+											note: "Each lookup returns one customer row, but the executor repeats it once for every matching order: 1,240,000 loops.",
+											self: 585,
+											est: 1,
+											act: 1,
+											loops: 1240000,
+										},
+									],
+								},
+							],
+						},
+					],
+				},
+			},
+		};
+
+		const summaryEl = lab.querySelector("#pl-summary");
+		const treeEl = lab.querySelector("#pl-tree");
+		const fmt = (n) => Math.round(n).toLocaleString("en-US");
+		const fmtTime = (n) => (n < 10 ? n.toFixed(2) : Math.round(n).toLocaleString("en-US"));
+
+		function computeTotals(node) {
+			let childTotal = 0;
+			if (node.children) {
+				node.children.forEach((c) => {
+					computeTotals(c);
+					childTotal += c._total;
+				});
+			}
+			node._total = node.self + childTotal;
+		}
+
+		function collect(node, out) {
+			out.push(node);
+			if (node.children) node.children.forEach((c) => collect(c, out));
+			return out;
+		}
+
+		function renderNode(node, depth, maxTotal) {
+			const bad = !!node.bad;
+			const factor = node.act > node.est * 10 ? Math.round(node.act / node.est) : null;
+
+			const totalPct = Math.min(100, (node._total / maxTotal) * 100);
+			const selfPct = Math.min(100, (node.self / maxTotal) * 100);
+
+			let meta = `<span>est ${fmt(node.est)}</span>`;
+			meta += `<span class="${bad ? "act-bad" : ""}">act ${fmt(node.act)}</span>`;
+			if (factor) meta += `<span class="pl-factor">×${fmt(factor)}</span>`;
+			if (node.loops) meta += `<span>loops ${fmt(node.loops)}</span>`;
+
+			let html = `
+      <div class="pl-node ${node.children ? "" : "leaf"} ${bad ? "bad-node" : ""}" style="--depth:${depth}">
+        <div class="pl-node-head">
+          <span class="pl-type">${node.type}</span>
+          <span class="pl-time">${fmtTime(node.self)} ms illustrative contribution</span>
+        </div>
+        <div class="pl-meta">${meta}</div>
+        <div class="pl-bars">
+          <div class="pl-bar-total"><div class="pl-bar-total-fill" style="width:${totalPct}%"></div></div>
+          <div class="pl-bar-self"><div class="pl-bar-self-fill" style="width:${selfPct}%"></div></div>
+        </div>
+        <div class="pl-detail">${node.note}</div>
+      </div>`;
+
+			if (node.children) {
+				node.children.forEach((c) => {
+					html += renderNode(c, depth + 1, maxTotal);
+				});
+			}
+			return html;
+		}
+
+		function show(key) {
+			lab
+				.querySelectorAll(".pl-btn")
+				.forEach((b) => b.classList.toggle("active", b.dataset.plan === key));
+
+			const plan = plans[key];
+			computeTotals(plan.root);
+			const all = collect(plan.root, []);
+			const maxTotal = Math.max(...all.map((n) => n._total));
+
+			summaryEl.innerHTML = plan.summary;
+
+			treeEl.classList.add("fade");
+			setTimeout(() => {
+				treeEl.innerHTML = renderNode(plan.root, 0, maxTotal);
+				treeEl.querySelectorAll(".pl-node").forEach((n) => {
+					n.addEventListener("click", () => n.classList.toggle("open"));
+				});
+				treeEl.classList.remove("fade");
+			}, 160);
+		}
+
+		lab.querySelectorAll(".pl-btn").forEach((b) => {
+			b.addEventListener("click", () => show(b.dataset.plan));
+		});
+
+		show("good");
+	})();
+</script>

@@ -1,0 +1,206 @@
+---
+// Lab 03 — Index / operator compatibility matrix
+---
+
+<div class="lab" id="lab-matrix">
+	<div class="lab-head">
+		<div>
+			<div class="lab-kicker">LAB 03 · INDEX TYPE / OPERATOR COMPATIBILITY</div>
+			<div class="lab-heading">What each access method accelerates</div>
+		</div>
+	</div>
+	<div class="mx-wrap">
+		<table class="mx-table" id="mx-table"></table>
+	</div>
+	<div class="mx-legend">
+		<span
+			><i style="background:#E6F4EA;border:1px solid var(--pg-green)"></i>supported in the relevant
+			built-in operator class</span
+		>
+		<span
+			><i style="background:#FFF1E8;border:1px solid var(--pg-orange)"></i>depends on the operator
+			class or data type</span
+		>
+		<span><i style="background:#F5F5F5;border:1px solid #CCC"></i>not generally supported</span>
+	</div>
+	<div class="mx-detail" id="mx-detail">
+		<h4>Click any cell</h4>
+		<p>
+			The matrix is a starting point. Check the operator class for the actual data type and query.
+			Even when an index supports an operator, the planner may choose another plan if it estimates
+			that plan to be cheaper.
+		</p>
+	</div>
+</div>
+
+<script is:inline>
+	(function initMatrix() {
+		const lab = document.getElementById("lab-matrix");
+		if (!lab) return;
+
+		const cols = [
+			{ key: "eq", label: "Equality (=)" },
+			{ key: "range", label: "Range (<, >)" },
+			{ key: "in", label: "IN / BETWEEN" },
+			{ key: "prefix", label: "Prefix LIKE" },
+			{ key: "null", label: "IS NULL" },
+			{ key: "contain", label: "Containment (@>, <@)" },
+			{ key: "overlap", label: "Overlap (&&)" },
+			{ key: "knn", label: "KNN (<->)" },
+			{ key: "order", label: "ORDER BY" },
+		];
+
+		const rows = [
+			{
+				key: "btree",
+				name: "B-tree",
+				cells: {
+					eq: "yes",
+					range: "yes",
+					in: "yes",
+					prefix: "dep",
+					null: "yes",
+					contain: "no",
+					overlap: "no",
+					knn: "no",
+					order: "yes",
+				},
+				note: "B-tree supports equality, range conditions, <code>IN</code>, <code>BETWEEN</code>, <code>IS NULL</code>, and ordered retrieval. It can also support a prefix pattern such as <code>LIKE 'abc%'</code>, but this depends on collation and operator class. It does not help with a leading-wildcard pattern such as <code>LIKE '%abc'</code>. It is the default index type.",
+				sql: "CREATE INDEX ON orders (customer_id, status);",
+			},
+			{
+				key: "hash",
+				name: "Hash",
+				cells: {
+					eq: "yes",
+					range: "no",
+					in: "no",
+					prefix: "no",
+					null: "no",
+					contain: "no",
+					overlap: "no",
+					knn: "no",
+					order: "no",
+				},
+				note: "Hash stores a 32-bit hash of the value. It handles only simple equality. It cannot order rows, cannot do ranges, and cannot support unique or multicolumn indexes.",
+				sql: "CREATE INDEX ON sessions USING hash (token);",
+			},
+			{
+				key: "gin",
+				name: "GIN",
+				cells: {
+					eq: "dep",
+					range: "no",
+					in: "no",
+					prefix: "dep",
+					null: "no",
+					contain: "dep",
+					overlap: "dep",
+					knn: "no",
+					order: "no",
+				},
+				note: "GIN is an inverted index: it stores entries for component values. It is useful for arrays, <code>jsonb</code>, and full-text search. The built-in array operator class supports equality, containment, and overlap. Other GIN operator classes support different operators, so check the data type and operator class.",
+				sql: "CREATE INDEX ON documents USING gin (tags);",
+			},
+			{
+				key: "gist",
+				name: "GiST",
+				cells: {
+					eq: "dep",
+					range: "dep",
+					in: "dep",
+					prefix: "dep",
+					null: "no",
+					contain: "dep",
+					overlap: "dep",
+					knn: "dep",
+					order: "no",
+				},
+				note: "GiST is an infrastructure, not one fixed index algorithm. Supported operators and nearest-neighbor searches depend on the operator class. Some built-in geometric GiST classes support containment and overlap. KNN searches use an ordering operator such as <code>&lt;-&gt;</code>; this is not the same as ordinary sorted retrieval.",
+				sql: "CREATE INDEX ON places USING gist (location);",
+			},
+			{
+				key: "spgist",
+				name: "SP-GiST",
+				cells: {
+					eq: "no",
+					range: "no",
+					in: "no",
+					prefix: "dep",
+					null: "no",
+					contain: "dep",
+					overlap: "no",
+					knn: "dep",
+					order: "no",
+				},
+				note: "SP-GiST supports non-balanced structures such as quadtrees, k-d trees, and radix trees. Some operator classes support prefix or spatial searches, and some support nearest-neighbor ordering. The available operators depend on the operator class.",
+				sql: "CREATE INDEX ON points USING spgist (p);",
+			},
+			{
+				key: "brin",
+				name: "BRIN",
+				cells: {
+					eq: "yes",
+					range: "yes",
+					in: "dep",
+					prefix: "no",
+					null: "yes",
+					contain: "dep",
+					overlap: "dep",
+					knn: "no",
+					order: "no",
+				},
+				note: "BRIN stores summaries for ranges of table pages. Minmax operator classes support equality and range comparisons; other operators depend on the operator class. BRIN can also use its range summaries to help with <code>IS NULL</code>. It is most useful when column values are well correlated with the physical order of the table. Check <code>pg_stats.correlation</code> before choosing it.",
+				sql: "CREATE INDEX ON events USING brin (created_at);",
+			},
+		];
+
+		const table = lab.querySelector("#mx-table");
+		const detail = lab.querySelector("#mx-detail");
+
+		let thead = "<thead><tr><th>Access method</th>";
+		cols.forEach((c) => {
+			thead += `<th class="rot"><span>${c.label}</span></th>`;
+		});
+		thead += "</tr></thead>";
+
+		let tbody = "<tbody>";
+		rows.forEach((r) => {
+			tbody += `<tr><td>${r.name}</td>`;
+			cols.forEach((c) => {
+				const v = r.cells[c.key];
+				const cls = v === "yes" ? "yes" : v === "dep" ? "dep" : "no";
+				const sym = v === "yes" ? "✓" : v === "dep" ? "~" : "·";
+				tbody += `<td class="mx-cell ${cls}" data-row="${r.key}" data-col="${c.key}">${sym}</td>`;
+			});
+			tbody += "</tr>";
+		});
+		tbody += "</tbody>";
+
+		table.innerHTML = thead + tbody;
+
+		table.querySelectorAll(".mx-cell").forEach((cell) => {
+			cell.addEventListener("click", () => {
+				table.querySelectorAll(".mx-cell").forEach((c) => c.classList.remove("sel"));
+				cell.classList.add("sel");
+
+				const row = rows.find((r) => r.key === cell.dataset.row);
+				const col = cols.find((c) => c.key === cell.dataset.col);
+				const val = row.cells[col.key];
+
+				const verdict =
+					val === "yes"
+						? `Supported by the relevant built-in ${row.name} operator class.`
+						: val === "dep"
+							? `Depends on the data type and operator class. Some ${row.name} operator classes support this operation, but not all of them.`
+							: `Not generally supported by ${row.name} for this operation.`;
+
+				detail.innerHTML =
+					`<h4>${row.name} · ${col.label}</h4>` +
+					`<p>${verdict}</p>` +
+					`<p>${row.note}</p>` +
+					`<pre>${row.sql}</pre>`;
+			});
+		});
+	})();
+</script>

@@ -1,0 +1,179 @@
+---
+// Lab 05 — when a sort spills to disk
+---
+
+<div class="lab" id="lab-workmem">
+	<div class="lab-head">
+		<div>
+			<div class="lab-kicker">LAB 05 · WORK_MEM AND SORT SPILL</div>
+			<div class="lab-heading">When a sort no longer fits in memory</div>
+			<p class="ss-insight">
+				About this simulation: The model assumes 100 bytes per row, a fixed merge fan-out of 64, and
+				a disk transfer rate of 100 MB/s. It uses simplified memory and processing estimates to show
+				how sorting can move from memory to temporary disk files. These values are educational
+				assumptions, not PostgreSQL defaults or real performance predictions.
+			</p>
+		</div>
+	</div>
+
+	<div class="wm-selectors">
+		<div class="wm-seg">
+			<span class="wm-seg-label">rows to sort</span>
+			<button class="wm-opt active" data-rows="1000000">1 M</button>
+			<button class="wm-opt" data-rows="5000000">5 M</button>
+			<button class="wm-opt" data-rows="20000000">20 M</button>
+			<button class="wm-opt" data-rows="50000000">50 M</button>
+		</div>
+		<div class="wm-seg">
+			<span class="wm-seg-label">work_mem</span>
+			<button class="wm-opt" data-mem="1">1 MB</button>
+			<button class="wm-opt" data-mem="4">4 MB</button>
+			<button class="wm-opt" data-mem="16">16 MB</button>
+			<button class="wm-opt" data-mem="64">64 MB</button>
+			<button class="wm-opt" data-mem="256">256 MB</button>
+			<button class="wm-opt active" data-mem="1024">1 GB</button>
+		</div>
+	</div>
+
+	<div class="wm-status" id="wm-status">
+		<div class="wm-status-label">SORT METHOD</div>
+		<div class="wm-status-method" id="wm-method">quicksort</div>
+		<div class="wm-status-detail" id="wm-detail"></div>
+	</div>
+
+	<div class="wm-bars">
+		<div class="wm-bar-row">
+			<div class="wm-bar-head"><span>memory used</span><b id="wm-mem-val">—</b></div>
+			<div class="wm-bar-track"><div class="wm-bar-fill mem" id="wm-mem-bar"></div></div>
+		</div>
+		<div class="wm-bar-row">
+			<div class="wm-bar-head"><span>temporary disk space</span><b id="wm-disk-val">—</b></div>
+			<div class="wm-bar-track"><div class="wm-bar-fill disk" id="wm-disk-bar"></div></div>
+		</div>
+	</div>
+
+	<pre class="wm-explain" id="wm-explain"></pre>
+
+	<div class="wm-grid">
+		<div class="wm-stat">
+			<div class="wm-stat-k">MODELED SORT INPUT</div><div class="wm-stat-v" id="wm-data">—</div>
+		</div>
+		<div class="wm-stat">
+			<div class="wm-stat-k">MERGE PASSES</div><div class="wm-stat-v" id="wm-passes">—</div>
+		</div>
+		<div class="wm-stat">
+			<div class="wm-stat-k">EST. TIME</div><div class="wm-stat-v" id="wm-time">—</div>
+		</div>
+	</div>
+</div>
+
+<script is:inline>
+	(function initWorkMem() {
+		const lab = document.getElementById("lab-workmem");
+		if (!lab) return;
+
+		const ROW_BYTES = 100;
+		const FANOUT = 64;
+		const ROWS_PER_MS = 100000; // 100 K rows / ms in memory
+		const DISK_MB_S = 100; // 100 MB / s to disk
+
+		const statusEl = lab.querySelector("#wm-status");
+		const methodEl = lab.querySelector("#wm-method");
+		const detailEl = lab.querySelector("#wm-detail");
+		const memValEl = lab.querySelector("#wm-mem-val");
+		const memBarEl = lab.querySelector("#wm-mem-bar");
+		const dskValEl = lab.querySelector("#wm-disk-val");
+		const dskBarEl = lab.querySelector("#wm-disk-bar");
+		const explainEl = lab.querySelector("#wm-explain");
+		const dataEl = lab.querySelector("#wm-data");
+		const passEl = lab.querySelector("#wm-passes");
+		const timeEl = lab.querySelector("#wm-time");
+
+		let rows = 1000000;
+		let workMemMB = 1024;
+
+		const fmt = (n) => Math.round(n).toLocaleString("en-US");
+		const fmtSize = (kb) =>
+			kb >= 1024 * 1024
+				? (kb / (1024 * 1024)).toFixed(1) + " GB"
+				: kb >= 1024
+					? (kb / 1024).toFixed(0) + " MB"
+					: Math.round(kb) + " kB";
+		const fmtTime = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(1) + " s" : Math.round(ms) + " ms");
+
+		function update() {
+			const dataMB = (rows * ROW_BYTES) / (1024 * 1024);
+			const fits = dataMB <= workMemMB;
+
+			let method, memoryKB, diskKB, passes, timeMs;
+
+			if (fits) {
+				method = "quicksort";
+				memoryKB = dataMB * 1024;
+				diskKB = 0;
+				passes = 0;
+				timeMs = rows / ROWS_PER_MS;
+			} else {
+				const ratio = dataMB / workMemMB;
+				passes = Math.ceil(Math.log(ratio) / Math.log(FANOUT));
+				method = "external merge";
+				memoryKB = workMemMB * 1024;
+				diskKB = dataMB * 1024;
+				timeMs = rows / ROWS_PER_MS + (dataMB / DISK_MB_S) * 1000 * passes;
+			}
+
+			statusEl.classList.toggle("mem", fits);
+			statusEl.classList.toggle("disk", !fits);
+			methodEl.textContent = method;
+
+			detailEl.textContent = fits
+				? "The full sort fits inside work_mem. No temporary files are created."
+				: `The input exceeds work_mem, so PostgreSQL splits it into sorted runs and merges them in ${passes} pass${passes === 1 ? "" : "es"}.`;
+
+			memValEl.textContent = fmtSize(memoryKB);
+			dskValEl.textContent = diskKB > 0 ? fmtSize(diskKB) : "0 kB";
+
+			const maxKB = Math.max(memoryKB, diskKB, 1);
+			memBarEl.style.width = (memoryKB / maxKB) * 100 + "%";
+			dskBarEl.style.width = (diskKB / maxKB) * 100 + "%";
+
+			dataEl.innerHTML =
+				(dataMB >= 1024 ? (dataMB / 1024).toFixed(2) + " GB" : dataMB.toFixed(0) + " MB") +
+				" <span>" +
+				fmt(rows) +
+				" rows × " +
+				ROW_BYTES +
+				" B</span>";
+			passEl.innerHTML =
+				passes +
+				" <span>" +
+				(passes === 0 ? "no merge" : "pass" + (passes === 1 ? "" : "es")) +
+				"</span>";
+			timeEl.innerHTML = fmtTime(timeMs) + " <span>illustrative</span>";
+
+			explainEl.innerHTML = fits
+				? `Sort  (cost=… rows=${fmt(rows)})\n  Sort Key: o.created_at DESC\n  Sort Method: <span class="hi-mem">quicksort  Memory: ${Math.round(memoryKB)}kB</span>`
+				: `Sort  (cost=… rows=${fmt(rows)})\n  Sort Key: o.created_at DESC\n  Sort Method: <span class="hi-disk">external merge  Disk: ${Math.round(diskKB)}kB</span>\n  Merge Passes: ${passes}`;
+		}
+
+		lab.querySelectorAll(".wm-opt[data-rows]").forEach((b) => {
+			b.addEventListener("click", () => {
+				lab.querySelectorAll(".wm-opt[data-rows]").forEach((x) => x.classList.remove("active"));
+				b.classList.add("active");
+				rows = +b.dataset.rows;
+				update();
+			});
+		});
+
+		lab.querySelectorAll(".wm-opt[data-mem]").forEach((b) => {
+			b.addEventListener("click", () => {
+				lab.querySelectorAll(".wm-opt[data-mem]").forEach((x) => x.classList.remove("active"));
+				b.classList.add("active");
+				workMemMB = +b.dataset.mem;
+				update();
+			});
+		});
+
+		update();
+	})();
+</script>
